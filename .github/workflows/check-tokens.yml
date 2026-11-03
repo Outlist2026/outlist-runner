@@ -1,0 +1,32 @@
+name: Check tokens
+
+# Writes nothing. Reports what each production token can do (permissions flags only, never the token). Runs in the Environment
+# "production", so it pauses for your approval like the write workflows.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      PERSONAL_WRITE_TOKEN: ${{ secrets.PERSONAL_WRITE_TOKEN }}
+      ORG_WRITE_TOKEN: ${{ secrets.ORG_WRITE_TOKEN }}
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
+    steps:
+      - name: Report
+        run: |
+          {
+            echo "### Token check"
+            p=$(GH_TOKEN="$ORG_WRITE_TOKEN" gh api repos/Outlist2026/outlist --jq '.permissions | "push=\(.push) pull=\(.pull)"' 2>&1 | head -1)
+            echo "- ORG_WRITE_TOKEN on Outlist2026/outlist: $p (needs push=true)"
+            p=$(GH_TOKEN="$PERSONAL_WRITE_TOKEN" gh api repos/FlavioApric/outlist --jq '.permissions | "push=\(.push) pull=\(.pull)"' 2>&1 | head -1)
+            echo "- PERSONAL_WRITE_TOKEN on FlavioApric/outlist: $p (needs pull=true; merging a PR needs pull-request write)"
+            c=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" "https://api.supabase.com/v1/projects/$PROJECT_REF")
+            echo "- SUPABASE_ACCESS_TOKEN on the project: HTTP $c (needs 200)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
