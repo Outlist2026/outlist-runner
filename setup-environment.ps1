@@ -3,7 +3,7 @@
 # creates it WITHOUT reviewers, and then nothing pauses.
 # Environment secrets are handed to a job only after approval: put the powerful ones here, not at repository level.
 $ErrorActionPreference = 'Stop'
-$Repo = 'FlavioApric/outlist-runner'
+$Repo = 'Outlist2026/outlist-runner'
 gh auth status
 $me = gh api user --jq .id
 '{"reviewers":[{"type":"User","id":' + $me + '}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' | gh api -X PUT "repos/$Repo/environments/production" --input -
