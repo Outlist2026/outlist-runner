@@ -1,0 +1,108 @@
+name: Ship web
+
+# Web-only fix to the apps: gate, then (after the owner approves the Environment "production") merge the PR on the personal repo,
+# push main fast-forward to the org repo (Cloudflare builds web + OTA), and wait for the OTA manifest.
+# Needs the Environment secrets PERSONAL_WRITE_TOKEN (pull requests: write on FlavioApric/outlist) and ORG_WRITE_TOKEN
+# (contents: write on Outlist2026/outlist). Environment secrets are only handed to the job after approval.
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'PR number on FlavioApric/outlist'
+        required: true
+      confirm:
+        description: 'Type YES to ship'
+        required: true
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ship-web
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      branch: ${{ steps.pr.outputs.branch }}
+    env:
+      IN_PR: ${{ inputs.pr }}
+      IN_CONFIRM: ${{ inputs.confirm }}
+      GH_TOKEN: ${{ secrets.PERSONAL_REPO_TOKEN }}
+    steps:
+      - name: Validate and read the PR
+        id: pr
+        run: |
+          [ "$IN_CONFIRM" = "YES" ] || { echo "::error::confirm must be YES"; exit 1; }
+          printf '%s' "$IN_PR" | grep -Eq '^[0-9]{1,6}$' || { echo "::error::pr must be a number"; exit 1; }
+          b=$(gh api "repos/FlavioApric/outlist/pulls/$IN_PR" --jq 'select(.state=="open") | .head.ref')
+          [ -n "$b" ] || { echo "::error::PR $IN_PR is not open"; exit 1; }
+          printf '%s' "$b" | grep -Eq '^[A-Za-z0-9._/-]{1,100}$' || { echo "::error::odd branch name"; exit 1; }
+          echo "branch=$b" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve
+    uses: ./.github/workflows/hotfix-verify.yml
+    with:
+      repo: FlavioApric/outlist
+      ref: ${{ needs.resolve.outputs.branch }}
+    secrets:
+      SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+      PERSONAL_REPO_TOKEN: ${{ secrets.PERSONAL_REPO_TOKEN }}
+
+  ship:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    outputs:
+      sha: ${{ steps.push.outputs.sha }}
+    env:
+      IN_PR: ${{ inputs.pr }}
+      PERSONAL_WRITE_TOKEN: ${{ secrets.PERSONAL_WRITE_TOKEN }}
+      ORG_WRITE_TOKEN: ${{ secrets.ORG_WRITE_TOKEN }}
+    steps:
+      - name: Merge the PR
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$PERSONAL_WRITE_TOKEN" && test -n "$ORG_WRITE_TOKEN" || { echo "::error::Environment secrets PERSONAL_WRITE_TOKEN / ORG_WRITE_TOKEN missing"; exit 1; }
+          gh api -X PUT "repos/FlavioApric/outlist/pulls/$IN_PR/merge" -f merge_method=merge --silent
+      - name: Push main fast-forward to the org repo
+        id: push
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api repos/FlavioApric/outlist/commits/main --jq .sha)
+          org=$(GH_TOKEN="$ORG_WRITE_TOKEN" gh api repos/Outlist2026/outlist/commits/main --jq .sha)
+          st=$(gh api "repos/FlavioApric/outlist/compare/$org...$sha" --jq '.status + " " + (.behind_by|tostring)')
+          echo "compare: $st"
+          case "$st" in "identical "*) echo "sha=$sha" >> "$GITHUB_OUTPUT"; exit 0 ;; "ahead 0") ;; *) echo "::error::not a fast-forward ($st)"; exit 1 ;; esac
+          git init -q work && cd work
+          git -c "http.extraheader=Authorization: basic $(printf 'x-access-token:%s' "$PERSONAL_WRITE_TOKEN" | base64 -w0)" fetch -q --depth=50 "https://github.com/FlavioApric/outlist.git" main
+          git -c "http.extraheader=Authorization: basic $(printf 'x-access-token:%s' "$ORG_WRITE_TOKEN" | base64 -w0)" push "https://github.com/Outlist2026/outlist.git" "$sha:refs/heads/main"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "pushed ${sha:0:7}" >> "$GITHUB_STEP_SUMMARY"
+
+  ota:
+    needs: ship
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SHA: ${{ needs.ship.outputs.sha }}
+    steps:
+      - name: Wait for the OTA manifest
+        run: |
+          end=$(( $(date +%s) + 40 * 60 ))
+          while :; do
+            if curl -fsS --max-time 20 https://app.outlist.org/ota/manifest.json | grep -q "${SHA:0:7}"; then
+              echo "### OTA manifest reached ${SHA:0:7}" >> "$GITHUB_STEP_SUMMARY"; exit 0
+            fi
+            [ "$(date +%s)" -lt "$end" ] || { echo "::error::manifest did not reach ${SHA:0:7}"; exit 1; }
+            sleep 30
+          done

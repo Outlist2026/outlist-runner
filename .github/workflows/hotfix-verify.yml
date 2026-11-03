@@ -1,19 +1,41 @@
 name: Hotfix verify
 
-# Read-only. Runs the fast gate for a web-only hotfix on a ref of the private source repo.
+# Read-only. Runs the fast gate for a web-only hotfix on a ref of a private source repo.
+# repo: the org repo (main and merged work) or the personal repo (where fix PR branches live).
 on:
   workflow_dispatch:
     inputs:
+      repo:
+        description: 'Source repository'
+        required: true
+        type: choice
+        default: 'Outlist2026/outlist'
+        options:
+          - Outlist2026/outlist
+          - FlavioApric/outlist
       ref:
-        description: 'Branch, tag or commit of Outlist2026/outlist'
+        description: 'Branch, tag or commit'
         required: true
         default: 'main'
+  workflow_call:
+    inputs:
+      repo:
+        required: true
+        type: string
+      ref:
+        required: true
+        type: string
+    secrets:
+      SOURCE_REPO_TOKEN:
+        required: true
+      PERSONAL_REPO_TOKEN:
+        required: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: hotfix-verify-${{ inputs.ref }}
+  group: hotfix-verify-${{ inputs.repo }}-${{ inputs.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -21,17 +43,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      IN_REPO: ${{ inputs.repo }}
       IN_REF: ${{ inputs.ref }}
     steps:
       - name: Validate input
         run: |
           printf '%s' "$IN_REF" | grep -Eq '^[A-Za-z0-9._/-]{1,100}$' || { echo "::error::ref has odd characters"; exit 1; }
+          case "$IN_REPO" in Outlist2026/outlist|FlavioApric/outlist) ;; *) echo "::error::repo not allowed"; exit 1 ;; esac
       - name: Checkout source (read-only token)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: Outlist2026/outlist
+          repository: ${{ inputs.repo }}
           ref: ${{ inputs.ref }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          token: ${{ inputs.repo == 'FlavioApric/outlist' && secrets.PERSONAL_REPO_TOKEN || secrets.SOURCE_REPO_TOKEN }}
           fetch-depth: 0
           persist-credentials: false
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -55,11 +79,17 @@ jobs:
           npm run test:covers
           node scripts/launch/check-hex.mjs
           npm run test:launch
-      - name: OTA compatibility (web only or store build?)
+      - name: Delivery type and native check
         run: |
-          if node --test tests/launch/ota-compat.test.mjs; then
-            echo "### Web only: reaches the 1.1.0 apps by OTA" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### Native change: needs a store build, not OTA" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
+          if [ -f scripts/fix/gate.mjs ]; then
+            git fetch --no-tags --depth=1 origin main 2>/dev/null || true
+            node scripts/fix/gate.mjs --list --base "$(git merge-base HEAD origin/main 2>/dev/null || echo HEAD~1)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f tests/launch/ota-compat.test.mjs ]; then
+            if node --test tests/launch/ota-compat.test.mjs; then
+              echo "### Web only: reaches the 1.1.0 apps by OTA" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "### Native change: needs a store build, not OTA" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
           fi

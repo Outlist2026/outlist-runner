@@ -1,11 +1,20 @@
 name: Deploy edge functions
 
-# Writes to PRODUCTION Supabase. Dispatch only, confirm must be YES.
+# Writes to PRODUCTION Supabase. Dispatch only. Runs in the Environment "production", which must have a required reviewer
+# (run setup-environment.ps1 first): the job pauses until the owner approves.
 on:
   workflow_dispatch:
     inputs:
+      repo:
+        description: 'Source repository'
+        required: true
+        type: choice
+        default: 'Outlist2026/outlist'
+        options:
+          - Outlist2026/outlist
+          - FlavioApric/outlist
       ref:
-        description: 'Branch, tag or commit of Outlist2026/outlist'
+        description: 'Branch, tag or commit'
         required: true
         default: 'main'
       functions:
@@ -28,6 +37,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment: production
     env:
       IN_FUNCTIONS: ${{ inputs.functions }}
       IN_CONFIRM: ${{ inputs.confirm }}
@@ -43,9 +53,9 @@ jobs:
       - name: Checkout source (read-only token)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: Outlist2026/outlist
+          repository: ${{ inputs.repo }}
           ref: ${{ inputs.ref }}
-          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          token: ${{ inputs.repo == 'FlavioApric/outlist' && secrets.PERSONAL_REPO_TOKEN || secrets.SOURCE_REPO_TOKEN }}
           persist-credentials: false
       - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359 # v3.0.1
         with:

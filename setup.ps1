@@ -4,6 +4,7 @@ Set-Location $PSScriptRoot
 $Repo = 'FlavioApric/outlist-runner'
 gh auth status
 gh repo create $Repo --public --source . --remote origin --push
-foreach ($s in 'SOURCE_REPO_TOKEN', 'SUPABASE_ACCESS_TOKEN') { gh secret set $s --repo $Repo }
+foreach ($s in 'SOURCE_REPO_TOKEN', 'PERSONAL_REPO_TOKEN') { gh secret set $s --repo $Repo }
 gh variable set SUPABASE_PROJECT_REF --repo $Repo --body 'mvstcieoabimbwiuhsof'
-Write-Host 'Done. Actions tab: Hotfix verify, Deploy edge functions, Verify OTA.' -ForegroundColor Green
+Write-Host 'Done. Read-only workflows ready: Hotfix verify, Verify OTA.' -ForegroundColor Green
+Write-Host 'Next, for the write workflows (Deploy edge functions, Ship migration, Ship web): .\setup-environment.ps1' -ForegroundColor Yellow
