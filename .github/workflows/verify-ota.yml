@@ -1,0 +1,41 @@
+name: Verify OTA
+
+# Read-only, no secret. Waits for the Cloudflare build to publish the OTA manifest at a commit.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Commit the manifest must reach (7-40 hex chars)'
+        required: true
+      wait_min:
+        description: 'Minutes to wait'
+        required: true
+        default: '40'
+
+permissions:
+  contents: read
+
+jobs:
+  ota:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      IN_SHA: ${{ inputs.sha }}
+      IN_WAIT: ${{ inputs.wait_min }}
+    steps:
+      - name: Validate inputs
+        run: |
+          printf '%s' "$IN_SHA" | grep -Eq '^[0-9a-f]{7,40}$' || { echo "::error::sha must be 7-40 hex chars"; exit 1; }
+          printf '%s' "$IN_WAIT" | grep -Eq '^[0-9]{1,2}$' || { echo "::error::wait_min must be a number"; exit 1; }
+      - name: Wait for the manifest
+        run: |
+          end=$(( $(date +%s) + IN_WAIT * 60 ))
+          while :; do
+            m=$(curl -fsS --max-time 20 https://app.outlist.org/ota/manifest.json || true)
+            if echo "$m" | grep -q "${IN_SHA:0:7}"; then
+              echo "### OTA manifest reached ${IN_SHA:0:7}" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            if [ "$(date +%s)" -ge "$end" ]; then echo "::error::manifest did not reach ${IN_SHA:0:7}"; exit 1; fi
+            sleep 30
+          done
