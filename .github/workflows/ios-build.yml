@@ -1,0 +1,400 @@
+name: Build iOS for TestFlight
+
+# PUBLIC repo, free macOS minutes. Dispatch only (no push / pull_request triggers, so forks can never run it).
+# The source is checked out read-only from the private repo with SOURCE_REPO_TOKEN / PERSONAL_REPO_TOKEN.
+# Signing and App Store Connect secrets live in the Environment "production": the job waits for the owner's
+# approval before it gets them. Nothing is published from this repo: no artifact, no IPA upload anywhere except
+# TestFlight, no file of the source is printed. Logs show only step results.
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Source repository'
+        required: true
+        type: choice
+        default: 'Outlist2026/outlist'
+        options:
+          - Outlist2026/outlist
+          - FlavioApric/outlist
+      ref:
+        description: 'Branch, tag or commit of the source'
+        required: true
+        default: 'main'
+      version_number:
+        description: 'Version name (e.g. 3.4.0)'
+        required: true
+        default: '3.4.0'
+      build_number:
+        description: 'Build number (integer, higher than every build already in App Store Connect)'
+        required: true
+        default: '340'
+      upload_to_testflight:
+        description: 'Upload to TestFlight'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      release_notes:
+        description: 'What to Test (TestFlight)'
+        required: false
+        default: 'Please test: 1) browse the feed and open an event without signing in; 2) sign in with the account in the review notes; 3) open a profile and tap the three dots to Report or Block (Settings > Safety lists blocked users); 4) open Messages and send a message to the second test account; 5) open the Map tab (no location permission is requested). The app is iPhone only, portrait. Web content updates over the air; no new native code is downloaded.'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 75
+    environment: production
+    permissions:
+      contents: read
+    env:
+      IN_REPO: ${{ inputs.repo }}
+      IN_REF: ${{ inputs.ref }}
+      IN_VERSION_NUMBER: ${{ inputs.version_number }}
+      IN_BUILD_NUMBER: ${{ inputs.build_number }}
+      IN_UPLOAD: ${{ inputs.upload_to_testflight }}
+      IN_RELEASE_NOTES: ${{ inputs.release_notes }}
+      BUNDLE_ID: org.outlist.app
+      TEAM_ID: 8QCCB5432L
+      SCHEME: App
+      WORKSPACE: app/ios/App/App.xcworkspace
+      EXPORT_OPTIONS_PLIST: /tmp/ExportOptions.plist
+      ARCHIVE_PATH: /tmp/App.xcarchive
+      IPA_DIR: /tmp/ipa-output
+
+    steps:
+      # ─── Validate inputs & resolve version ───────────────────────────────────
+      - name: Validate inputs and resolve build number
+        id: meta
+        run: |
+          if ! printf '%s' "$IN_VERSION_NUMBER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::version_number must look like 1.2.3"
+            exit 1
+          fi
+          case "$IN_REPO" in Outlist2026/outlist|FlavioApric/outlist) ;; *) echo "::error::repo not allowed"; exit 1 ;; esac
+          printf '%s' "$IN_REF" | grep -Eq '^[A-Za-z0-9._/-]{1,100}$' || { echo "::error::ref has odd characters"; exit 1; }
+          printf '%s' "$IN_BUILD_NUMBER" | grep -Eq '^[0-9]{1,6}$' || { echo "::error::build_number must be an integer"; exit 1; }
+          BUILD="$IN_BUILD_NUMBER"; SRC=manual
+          {
+            echo "version_number=$IN_VERSION_NUMBER"
+            echo "build_number=$BUILD"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved: $IN_VERSION_NUMBER (build $BUILD, $SRC)"
+
+      # ─── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout source (read-only token, private repo)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.ref }}
+          token: ${{ inputs.repo == 'FlavioApric/outlist' && secrets.PERSONAL_REPO_TOKEN || secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+
+      # ─── Node.js + pnpm ──────────────────────────────────────────────────────
+      - name: Setup Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: '9'
+
+      # ─── Web build ───────────────────────────────────────────────────────────
+      - name: Install JS dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint gate
+        working-directory: app
+        run: pnpm run lint
+
+      - name: Build web app (Vite)
+        working-directory: app
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: pnpm run build
+
+      - name: Copy Firebase config files
+        working-directory: app
+        run: node scripts/copy-firebase-config.mjs
+
+      - name: Validate iOS release secrets
+        env:
+          IOS_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        run: |
+          test -n "$IOS_DISTRIBUTION_CERTIFICATE_BASE64" || { echo "::error::IOS_DISTRIBUTION_CERTIFICATE_BASE64 is not configured"; exit 1; }
+          test -n "$IOS_PROVISIONING_PROFILE_BASE64" || { echo "::error::IOS_PROVISIONING_PROFILE_BASE64 is not configured"; exit 1; }
+          echo "::notice::iOS signing inputs are configured; certificate contents are validated during import"
+
+      # ─── Capacitor iOS ───────────────────────────────────────────────────────
+      - name: Add iOS platform
+        working-directory: app
+        run: |
+          if [ ! -d ios ]; then
+            npx --yes @capacitor/cli@7.6.7 add ios
+          else
+            echo "iOS platform already exists, skipping add"
+          fi
+
+      # ─── CocoaPods ───────────────────────────────────────────────────────────
+      - name: Setup CocoaPods
+        run: |
+          sudo gem install cocoapods --no-document
+          pod --version
+
+      - name: Sync Capacitor
+        working-directory: app
+        run: npx --yes @capacitor/cli@7.6.7 sync ios
+
+      # ─── Xcode version ───────────────────────────────────────────────────────
+      - name: Select Xcode version
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      # ─── Signing — import certificate ────────────────────────────────────────
+      - name: Import signing certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
+          KEYCHAIN_PASS=outlist-keychain-$(date +%s)
+          CERT_PATH=$RUNNER_TEMP/distribution.p12
+
+          echo "$CERTIFICATE_BASE64" | base64 --decode -o "$CERT_PATH"
+          echo "Certificate size: $(wc -c < "$CERT_PATH") bytes"
+
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+
+          # Try with password first; if it fails and password is empty, retry without -P
+          if [ -n "$CERTIFICATE_PASSWORD" ]; then
+            security import "$CERT_PATH" -P "$CERTIFICATE_PASSWORD" \
+              -A -t cert -f pkcs12 \
+              -k "$KEYCHAIN_PATH"
+          else
+            # .p12 exported without password — omit -P flag
+            security import "$CERT_PATH" \
+              -A -t cert -f pkcs12 \
+              -k "$KEYCHAIN_PATH"
+          fi
+
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PASS=$KEYCHAIN_PASS" >> "$GITHUB_ENV"
+
+      # ─── Signing — provisioning profile ──────────────────────────────────────
+      - name: Install provisioning profile
+        env:
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          PP_PATH=$RUNNER_TEMP/profile.mobileprovision
+          echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode -o "$PP_PATH"
+
+          # Extract UUID for profile installation
+          UUID=$(security cms -D -i "$PP_PATH" 2>/dev/null | \
+            plutil -extract UUID raw - 2>/dev/null || \
+            grep -a -A1 "<key>UUID</key>" "$PP_PATH" | tail -1 | \
+            sed 's/.*<string>\(.*\)<\/string>.*/\1/')
+
+          echo "Provisioning Profile UUID: $UUID"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PP_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$UUID.mobileprovision"
+          echo "PP_UUID=$UUID" >> "$GITHUB_ENV"
+
+      # ─── Version bump ─────────────────────────────────────────────────────────
+      - name: Set version and build number
+        working-directory: app/ios/App
+        env:
+          VN: ${{ steps.meta.outputs.version_number }}
+          BN: ${{ steps.meta.outputs.build_number }}
+        run: |
+          agvtool new-marketing-version "$VN"
+          agvtool new-version -all "$BN"
+          echo "Version: $(agvtool mvers -terse1) Build: $(agvtool vers -terse)"
+
+      # ─── Export options plist ────────────────────────────────────────────────
+      - name: Write ExportOptions.plist
+        run: |
+          cat > "$EXPORT_OPTIONS_PLIST" << PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>app-store</string>
+              <key>teamID</key>
+              <string>${TEAM_ID}</string>
+              <key>uploadBitcode</key>
+              <false/>
+              <key>uploadSymbols</key>
+              <true/>
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>${BUNDLE_ID}</key>
+                  <string>${PP_UUID}</string>
+              </dict>
+          </dict>
+          </plist>
+          PLIST
+
+      # ─── Build — Archive ─────────────────────────────────────────────────────
+      - name: Archive (xcodebuild)
+        run: |
+          set -o pipefail
+          # Run without xcpretty so signing errors are fully visible in logs
+          xcodebuild \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination generic/platform=iOS \
+            -archivePath "$ARCHIVE_PATH" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$PP_UUID" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH" \
+            archive 2>&1 | tee /tmp/xcodebuild-archive.log | grep -E "error:|warning:.*error|ARCHIVE|CodeSign|signing|provision|BUILD|Signing" || true
+          
+          # Check actual result (tee means last pipe exit is grep, check log instead)
+          if ! grep -q "ARCHIVE SUCCEEDED" /tmp/xcodebuild-archive.log; then
+            echo "::error::Archive failed. Last 40 lines of build log:"
+            tail -40 /tmp/xcodebuild-archive.log
+            exit 1
+          fi
+
+      # ─── Guard: Firebase config must be inside the .app (build 113 crashed on launch without it, guideline 2.1(a)) ───
+      - name: Verify GoogleService-Info.plist is in the app bundle
+        run: |
+          APP=$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -name "*.app" | head -1)
+          if [ -z "$APP" ] || [ ! -s "$APP/GoogleService-Info.plist" ]; then
+            echo "::error::GoogleService-Info.plist is missing from the app bundle ($APP). FIRApp.configure() would crash at launch. Check the file is in the Xcode target (Copy Bundle Resources)."
+            exit 1
+          fi
+          echo "OK: $APP/GoogleService-Info.plist present"
+
+      # ─── Build — Export IPA ───────────────────────────────────────────────────
+      - name: Export IPA
+        run: |
+          mkdir -p "$IPA_DIR"
+
+          xcodebuild \
+            -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$IPA_DIR" \
+            -exportOptionsPlist "$EXPORT_OPTIONS_PLIST"
+
+          echo "=== IPA dir contents ==="
+          ls -la "$IPA_DIR" || true
+
+          IPA=$(find "$IPA_DIR" -name "*.ipa" | head -1)
+          if [ -z "$IPA" ]; then
+            echo "::error::No .ipa file found in $IPA_DIR after export"
+            exit 1
+          fi
+          echo "IPA: $IPA ($(du -h "$IPA" | cut -f1))"
+          echo "IPA_PATH=$IPA" >> "$GITHUB_ENV"
+
+      # No IPA copy is kept here: this repo is public, so artifacts and storage uploads are left out on purpose.
+
+      # ─── TestFlight upload ───────────────────────────────────────────────────
+      # xcrun altool is deprecated/removed on current Xcode runners; fastlane
+      # pilot is the supported path (preinstalled on GitHub macOS runners).
+      # altool kept only as a fallback for runner images that still ship it.
+      - name: Upload to TestFlight
+        if: ${{ inputs.upload_to_testflight == 'true' }}
+        env:
+          # NOTE: must NOT be named APP_STORE_CONNECT_API_KEY — fastlane reads that
+          # env var natively, expects a JSON hash, and crashes on the raw p8 string.
+          ASC_API_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          # Build the App Store Connect API key JSON for fastlane (in runner temp, never logged)
+          python3 - << 'PYEOF'
+          import json, os
+          key = os.environ["ASC_API_KEY_CONTENT"].strip()
+          if not key.startswith("-----BEGIN"):
+              key = "-----BEGIN PRIVATE KEY-----\n" + key + "\n-----END PRIVATE KEY-----"
+          api_key = {
+              "key_id": os.environ["APP_STORE_CONNECT_KEY_ID"],
+              "issuer_id": os.environ["APP_STORE_CONNECT_ISSUER_ID"],
+              "key": key,
+              "in_house": False,
+          }
+          with open("/tmp/api_key.json", "w") as f:
+              json.dump(api_key, f)
+          PYEOF
+
+          if ! command -v fastlane >/dev/null 2>&1; then
+            echo "fastlane not preinstalled - installing"
+            sudo gem install fastlane -v 2.219.0 --no-document --quiet || brew install fastlane
+          fi
+          if command -v fastlane >/dev/null 2>&1; then
+            # Pass the API key as inline JSON (parsed as a Hash) — avoids both the
+            # APP_STORE_CONNECT_API_KEY env collision and pilot's username fallback.
+            fastlane pilot upload \
+              --api_key "$(cat /tmp/api_key.json)" \
+              --ipa "$IPA_PATH" \
+              --changelog "$IN_RELEASE_NOTES" \
+              --skip_waiting_for_build_processing true
+          elif xcrun --find altool >/dev/null 2>&1; then
+            echo "::warning::fastlane not found — falling back to deprecated xcrun altool (may stop working on newer Xcode)"
+            mkdir -p "$HOME/.appstoreconnect/private_keys"
+            KEY_ID=$(python3 -c "import json;print(json.load(open('/tmp/api_key.json'))['key_id'])")
+            ISSUER_ID=$(python3 -c "import json;print(json.load(open('/tmp/api_key.json'))['issuer_id'])")
+            python3 -c "import json,os;open(os.path.join(os.environ['HOME'],'.appstoreconnect/private_keys/AuthKey_'+json.load(open('/tmp/api_key.json'))['key_id']+'.p8'),'w').write(json.load(open('/tmp/api_key.json'))['key'])"
+            xcrun altool --upload-app \
+              --type ios \
+              --file "$IPA_PATH" \
+              --apiKey "$KEY_ID" \
+              --apiIssuer "$ISSUER_ID" \
+              --verbose
+          else
+            echo "::error::No TestFlight upload tool available (fastlane missing and xcrun altool removed on this runner)"
+            exit 1
+          fi
+
+          rm -f /tmp/api_key.json
+          rm -f "$HOME/.appstoreconnect/private_keys"/AuthKey_*.p8 2>/dev/null || true
+
+      # ─── Cleanup keychain ────────────────────────────────────────────────────
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+
+      # ─── Summary ─────────────────────────────────────────────────────────────
+      - name: Job summary
+        if: always()
+        env:
+          VN: ${{ steps.meta.outputs.version_number }}
+          BN: ${{ steps.meta.outputs.build_number }}
+        run: |
+          {
+            echo "## iOS Build Summary"
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Version | $VN (build $BN) |"
+            echo "| Source | $IN_REPO @ $IN_REF |"
+            echo "| Bundle ID | $BUNDLE_ID |"
+            echo "| Team ID | $TEAM_ID |"
+            if [ "$IN_UPLOAD" = "true" ]; then
+              echo "| TestFlight | upload requested (see step result) |"
+            else
+              echo "| TestFlight | skipped (no copy is kept in this public repo) |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
