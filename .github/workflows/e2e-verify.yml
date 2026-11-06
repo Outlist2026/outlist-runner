@@ -68,6 +68,11 @@ jobs:
         run: |
           (cd app && pnpm install --frozen-lockfile)
           npm ci
+      - name: apt network timeouts (a stalled Ubuntu mirror download retries in seconds instead of hanging)
+        run: |
+          echo 'Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/80-ci-timeouts
+          echo 'Acquire::http::Timeout "20";' | sudo tee -a /etc/apt/apt.conf.d/80-ci-timeouts
+          echo 'Acquire::https::Timeout "20";' | sudo tee -a /etc/apt/apt.conf.d/80-ci-timeouts
       - name: Install Playwright browsers
         timeout-minutes: 15
         # A stalled download (seen 3 times on 6/11) gets a second attempt; this retries the setup download only, never a test.
