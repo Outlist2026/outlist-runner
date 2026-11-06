@@ -1,4 +1,5 @@
 name: Maestro verify
+run-name: "maestro-verify ${{ inputs.repo }}@${{ inputs.ref }}"
 
 # Read-only. Builds a debug APK of a private source ref against a local Supabase on the runner and runs the Maestro flows
 # on an Android 34 emulator. Same steps as the source repo's maestro-android.yml (private Actions minutes are blocked).

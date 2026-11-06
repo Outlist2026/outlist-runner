@@ -1,4 +1,5 @@
 name: E2E verify
+run-name: "e2e-verify ${{ inputs.repo }}@${{ inputs.ref }}"
 
 # Read-only. Runs the Playwright E2E suites (smoke + full, local Supabase on the runner) on a ref of a private source repo.
 # Same steps as the source repo's CI e2e jobs, which cannot run there (private Actions minutes blocked).

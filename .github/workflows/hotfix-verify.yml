@@ -1,4 +1,5 @@
 name: Hotfix verify
+run-name: "hotfix-verify ${{ inputs.repo }}@${{ inputs.ref }}"
 
 # Read-only. Runs the fast gate for a web-only hotfix on a ref of a private source repo.
 # repo: the org repo (main and merged work) or the personal repo (where fix PR branches live).
