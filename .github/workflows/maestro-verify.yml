@@ -58,6 +58,7 @@ jobs:
           persist-credentials: false
 
       - name: Free disk space (dotnet, ghc and CodeQL are not needed; the Android SDK is)
+        timeout-minutes: 10
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift /opt/microsoft /usr/local/.ghcup
           sudo apt-get clean
@@ -98,12 +99,14 @@ jobs:
           cache-dependency-path: app/pnpm-lock.yaml
 
       - name: Install dependencies
+        timeout-minutes: 15
         if: env.IN_APK_SOURCE == 'debug'
         run: |
           npm ci
           pnpm --dir app install --frozen-lockfile
 
       - name: Start local Supabase (seeded)
+        timeout-minutes: 20
         if: env.IN_APK_SOURCE == 'debug'
         run: npm run db:local:start
 
