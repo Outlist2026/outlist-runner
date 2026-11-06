@@ -70,7 +70,9 @@ jobs:
           npm ci
       - name: Install Playwright browsers
         timeout-minutes: 15
-        run: npx playwright install --with-deps chromium webkit
+        # A stalled download (seen 3 times on 6/11) gets a second attempt; this retries the setup download only, never a test.
+        run: |
+          for i in 1 2; do timeout 420 npx playwright install --with-deps chromium webkit && exit 0; echo "browser install attempt $i stalled or failed"; done; exit 1
       - name: Free disk space
         timeout-minutes: 10
         run: |
