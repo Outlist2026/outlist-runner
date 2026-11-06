@@ -92,6 +92,12 @@ jobs:
           E2E_SKIP_SCREENSHOTS: '1'
           SUITE_CMD: ${{ matrix.cmd }}
         run: bash -c "$SUITE_CMD"
+      - name: Failure context (page snapshot of each failed test, edge function log)
+        if: failure()
+        run: |
+          for f in $(find test-results -name error-context.md 2>/dev/null | head -10); do echo "==== $f"; head -c 5000 "$f"; echo; done
+          c=$(docker ps --format '{{.Names}}' | grep -m1 edge_runtime || true)
+          if [ -n "$c" ]; then echo "==== edge runtime log ($c)"; docker logs --tail 150 "$c" 2>&1 | grep -viE "apikey|authorization|bearer|service_role|password" || true; fi
       - name: Stop local Supabase
         if: always()
         run: npm run db:local:stop
